@@ -1,0 +1,36 @@
+args <- commandArgs(TRUE); root <- args[1]; out <- file.path(root,'11_Disease_Stratified_Effects')
+meta <- read.delim(file.path(root,'01_Samples_Phenotypes/metadata.tsv'),check.names=FALSE,stringsAsFactors=FALSE)
+ph <- read.delim(file.path(root,'01_Samples_Phenotypes/phenotypes.tsv'),check.names=FALSE,stringsAsFactors=FALSE)
+pc <- read.delim(file.path(root,'02_Variants/DS_PCA.eigenvec'),check.names=FALSE,stringsAsFactors=FALSE)
+gt <- read.table(file.path(out,'lead_dosages.raw'),header=TRUE,check.names=FALSE,stringsAsFactors=FALSE)
+leads <- read.delim(file.path(root,'05_LD_Cohort_Robustness/lead_pairs.tsv'),check.names=FALSE,stringsAsFactors=FALSE)
+ret <- read.delim(file.path(root,'06_Prioritized_Candidates/Retained_71_Signals.tsv'),check.names=FALSE,stringsAsFactors=FALSE)
+stopifnot(nrow(meta)==879,nrow(ph)==879,nrow(gt)==879,nrow(leads)==87,nrow(ret)==71,!anyDuplicated(meta$IID))
+ids <- as.character(meta$IID)
+for(x in list(ph,pc,gt))stopifnot(setequal(ids,as.character(x$IID)),!anyDuplicated(x$IID))
+ph <- ph[match(ids,ph$IID),];pc <- pc[match(ids,pc$IID),];gt <- gt[match(ids,gt$IID),]
+d <- data.frame(IID=ids,CRC=as.integer(meta$condition=='CRC'),cohort=factor(meta$Cohort),pc[,paste0('PC',1:10)])
+stopifnot(sum(d$CRC==1)==434,sum(d$CRC==0)==445)
+cov <- paste(c(paste0('PC',1:10),'cohort'),collapse='+')
+checkfit <- function(f) {stopifnot(f$rank==ncol(model.matrix(f)));f}
+coefrow <- function(f,name) {s <- summary(f)$coefficients;stopifnot(name %in% rownames(s),all(is.finite(s[name,])));ci <- confint(f,name);c(beta=s[name,1],SE=s[name,2],P=s[name,4],CI_low=ci[1],CI_high=ci[2],N=nobs(f))}
+rows <- list()
+for(i in seq_len(nrow(leads))) {
+ z <- leads[i,];col <- paste0(z$SNP,'_',z$A1);stopifnot(col %in% names(gt));d$DS <- round(gt[[col]]*16384)/16384;d$y <- ph[[z$trait]]
+ stopifnot(all(is.na(d$DS)|d$DS>=0&d$DS<=2))
+ pooled <- checkfit(lm(as.formula(paste('y~DS+CRC+',cov)),data=d))
+ c0 <- coefrow(checkfit(lm(as.formula(paste('y~DS+',cov)),data=d[d$CRC==0,])),'DS')
+ c1 <- coefrow(checkfit(lm(as.formula(paste('y~DS+',cov)),data=d[d$CRC==1,])),'DS')
+ inter <- coefrow(checkfit(lm(as.formula(paste('y~DS*CRC+',cov)),data=d)),'DS:CRC')
+ original <- coefrow(pooled,'DS');stopifnot(abs(original['beta']-z$BETA)<1e-4)
+ keep <- paste(z$trait,z$SNP) %in% paste(ret$trait,ret$SNP)
+ rows[[i]] <- data.frame(trait=z$trait,species=z$species,SNP=z$SNP,effect_allele=z$A1,retained71=keep,pooled_beta=original['beta'],pooled_P=original['P'],CTR_beta=c0['beta'],CTR_SE=c0['SE'],CTR_P=c0['P'],CTR_N=c0['N'],CRC_beta=c1['beta'],CRC_SE=c1['SE'],CRC_P=c1['P'],CRC_N=c1['N'],interaction_beta=inter['beta'],interaction_SE=inter['SE'],interaction_P=inter['P'],interaction_N=inter['N'],same_direction=c0['beta']*c1['beta']>0)
+}
+r <- do.call(rbind,rows);rownames(r) <- NULL;r$interaction_FDR87 <- p.adjust(r$interaction_P,'BH');stopifnot(sum(r$retained71)==71)
+write.table(r,file.path(out,'All_87_Disease_Stratified_Effects.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
+write.table(r[r$retained71,],file.path(out,'Prioritized_71_Disease_Stratified_Effects.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
+write.table(r[r$trait=='core161',],file.path(out,'Bc_Disease_Stratified_Effects.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
+s <- data.frame(metric=c('signals','retained','nominal_interaction_P_lt005','interaction_FDR87_lt005','minimum_FDR87','same_direction','retained_same_direction','retained_nominal_interaction','retained_FDR87_lt005'),value=c(nrow(r),sum(r$retained71),sum(r$interaction_P<.05),sum(r$interaction_FDR87<.05),min(r$interaction_FDR87),sum(r$same_direction),sum(r$same_direction&r$retained71),sum(r$interaction_P<.05&r$retained71),sum(r$interaction_FDR87<.05&r$retained71)))
+write.table(s,file.path(out,'Summary.tsv'),sep='\t',row.names=FALSE,quote=FALSE)
+writeLines(c('COMPLETE_VALIDATED','Current879 samples;434 CRC;445 CTR;87 lead pairs;71 priority flags.','DS counted for original effect allele; PGEN dosage grid restored as round(DS*16384)/16384; pooled beta reproduced.','Frozen original CLR/RINT phenotypes; no within-stratum reranking.','Stratified: phenotype ~ DS + PC1-10 + cohort.','Interaction: phenotype ~ DS*CRC + PC1-10 + cohort. CRC coded1, CTR0.','BH adjustment across all87 interaction tests; retained71 reports retain the same FDR87.','No old21-signal results used. Same-discovery-sample sensitivity; nonsignificant interaction is not proof of equal effects.','Not a new filter for prioritized candidates.'),file.path(out,'README.txt'))
+print(s);print(r[r$trait=='core161',]);writeLines('COMPLETE_VALIDATED',file.path(out,'STATUS.txt'))

@@ -1,0 +1,9 @@
+MMUPHin
+data.table
+digest
+glmnet
+lme4
+lmerTest
+metafor
+pROC
+sandwich
